@@ -1,4 +1,4 @@
-from curses import is_term_resized
+import sys
 import cv2
 import streamlink
 import re
@@ -10,10 +10,11 @@ import imutils
 import time
 from tesserocr import PyTessBaseAPI, PSM
 from string import digits
-
+from db import ReturnalDb
+import asyncio
 
 #URL = "https://www.twitch.tv/danger1983__"
-URL = "https://youtu.be/c8fK07HwotA"
+URL = "https://www.youtube.com/watch?v=GFDUztIOvEU"
 
 
 class CircularBuffer(object):
@@ -51,25 +52,32 @@ class CircularBuffer(object):
 api = PyTessBaseAPI()
 api.SetVariable('tessedit_char_whitelist', 'x0123456789,.')
 LABELS = [ "phase", "room", "score", "multi" ]
-SIZE = 5
+SIZE = 6
 
 
-def get_text_out(img, single):
+def get_stream_url(url):
+    streams = streamlink.streams(url)
+    stream = streams['best']
+    if isinstance(stream, streamlink.stream.http.HTTPStream):
+        return stream.to_url()
+    else:
+        return stream.substreams[0].to_url()
+    
+
+def get_text_out(img, single, debug):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret, thresh1 = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
-    rect_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    dilation = cv2.dilate(thresh1, rect_kernel, iterations = 1)
-
+    ret, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
+    
     api.SetPageSegMode(PSM.SINGLE_CHAR if single else PSM.SINGLE_LINE)
     
-    api.SetImage(Image.fromarray(gray))
-    gray_text = api.GetUTF8Text()
+    api.SetImage(Image.fromarray(thresh))
+    text = api.GetUTF8Text()
+
+    if debug is not None:
+        cv2.imshow(debug, thresh)
     
 
-    api.SetImage(Image.fromarray(dilation))
-    dill_text = api.GetUTF8Text()
-
-    ret = gray_text if gray_text == dill_text else None
+    ret = text
     if ret:
         conf = api.AllWordConfidences()[0] 
     else:
@@ -79,6 +87,7 @@ def get_text_out(img, single):
 
 class Recognizer(object):
     def __init__(self, validator, is_single_digit=False):
+        self.debug = None
         self.last = CircularBuffer(SIZE)
         self.current = 0
         self.validator = validator or (lambda new, old: new)
@@ -90,7 +99,7 @@ class Recognizer(object):
         self.on_new_value_fun = fun or (lambda new, old: None)
 
     def recognize(self, image):
-        text, confidence = get_text_out(image, self.is_single_digit)
+        text, confidence = get_text_out(image, self.is_single_digit, self.debug)
         if text is None or confidence < 60:
             return
 
@@ -157,30 +166,72 @@ def validate_multi(new, old):
     return multiplier
 
 
+DB = ReturnalDb()
+SHOULD_RECORD = -1
+
+def on_new_room(new, old):
+    global SHOULD_RECORD
+    SHOULD_RECORD = 20
+    print(f"Room => {new}")    
+
 # MAIN
-
-if __name__ == "__main__":
-    streams = streamlink.streams(URL)
-    stream_url = streams["best"].to_url()
-
-    cap = cv2.VideoCapture(stream_url)
-    fps = FPS().start()
-
+def get_recognizers():
     phase = Recognizer(validate_phase, True)
     room = Recognizer(validate_room)
     score = Recognizer(validate_score)
-    multi = Recognizer(validate_multi)
+    multi = Recognizer(validate_multi)  
+    multi.debug = "Multiplier"
 
-    recognizers = (phase, room, score, multi)
+
+
     phase.set_on_new_value(lambda new, old: print(f"Phase => {new}"))
-    room.set_on_new_value(lambda new, old: print(f"Room => {new}"))
     score.set_on_new_value(lambda new, old: print(f"Score => {new}"))
     multi.set_on_new_value(lambda new, old: print(f"Multi => {new}"))
+    room.set_on_new_value(on_new_room)
+
+    return (phase, room, score, multi)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        sys.argv.append("returnal.webm")
+
+    if sys.argv[1].startswith("http"):
+        stream_url = get_stream_url(sys.argv[1])
+        cap = cv2.VideoCapture(stream_url)
+    else:
+        cap = cv2.VideoCapture(sys.argv[1])
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1180000)
+
+    fps = FPS().start()
+    recognizers = get_recognizers()
+
+    w1 = 1584
+    w2 = 1920
+    h1 = 90
+    h2 = 426
+    
+    recalc = True
+    wr = 1
+    hr = 1
+
 
     while True:
         ret, frame = cap.read()
+        if frame.shape[0] != 1080 and recalc:
+            print("RESIZING")
+            wr = frame.shape[1] / 1920
+            hr = frame.shape[0] / 1080
 
-        frame = frame[90:426, 1584:1920]
+            w1 = int(w1 * wr)
+            w2 = int(w2 * wr)
+            h1 = int(h1 * hr)
+            h2 = int(h2 * hr)
+            recalc = False
+            
+
+        frame = frame[h1:h2, w1:w2]
+        frame = cv2.resize(frame, (336, 336))
 
         fphase = frame[33:81, 76:124]
         froom = frame[30:81, 187:252]
@@ -188,20 +239,29 @@ if __name__ == "__main__":
         fmulti = frame[223:260, 165:282]
 
         fragments = (fphase, froom, fscore, fmulti)
-
         for rec, frag in zip(recognizers, fragments):
             rec.recognize(frag)
 
-        fps.update()
+        if SHOULD_RECORD > 0:
+            SHOULD_RECORD -= 1
 
+        if SHOULD_RECORD == 0:
+            SHOULD_RECORD = -1
+            phase, room, score, multi = recognizers
+            DB.record(phase.current, room.current, score.current, multi.current)
+        
+        fps.update()
         cv2.imshow("Frame", frame)
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord("q"):
             break
-        if key == ord("s"):
+        elif key == ord("s"):
             for label, rec in zip(LABELS, recognizers):
                 print(f"{label.capitalize()} = {rec.current}")
+        elif key == ord("r"):
+            DB.start_new_run()
+            recognizers = get_recognizers()
 
     # stop the timer and display FPS information
     fps.stop()
