@@ -2,57 +2,17 @@ import sys
 import cv2
 import streamlink
 import re
-from imutils.video import FPS
-from imutils.object_detection import non_max_suppression
+from circular_buffer import CircularBuffer
 import numpy as np
 from PIL import Image
-import imutils
-import time
 from tesserocr import PyTessBaseAPI, PSM
-from string import digits
 from db import ReturnalDb
-import asyncio
-
-#URL = "https://www.twitch.tv/danger1983__"
-URL = "https://www.youtube.com/watch?v=GFDUztIOvEU"
-
-
-class CircularBuffer(object):
-    def __init__(self, size):
-        """initialization"""
-        self.index= 0
-        self.size= size
-        self._data = []
-
-    def record(self, value):
-        """append an element"""
-        if len(self._data) == self.size:
-            self._data[self.index]= value
-        else:
-            self._data.append(value)
-        self.index= (self.index + 1) % self.size
-
-    def __getitem__(self, key):
-        """get element by index like a regular array"""
-        return(self._data[key])
-
-    def __repr__(self):
-        """return string representation"""
-        return self._data.__repr__() + ' (' + str(len(self._data))+' items)'
-
-    def get_all(self):
-        """return a list of all the elements"""
-        return(self._data)
-
-    def all_equal(self):
-        return self._data.count(self._data[0]) == len(self._data)  
-
-
+from video_capture import ReturnalFFMPEGCapture
 
 api = PyTessBaseAPI()
 api.SetVariable('tessedit_char_whitelist', 'x0123456789,.')
 LABELS = [ "phase", "room", "score", "multi" ]
-SIZE = 6
+SIZE = 10
 
 
 def get_stream_url(url):
@@ -66,8 +26,10 @@ def get_stream_url(url):
 
 def get_text_out(img, single, debug):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    mask = cv2.inRange(gray, (127,), (255,))
+    if np.count_nonzero(mask) / np.size(mask) <= 0.03:
+        return None, 0
     ret, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
-    
     api.SetPageSegMode(PSM.SINGLE_CHAR if single else PSM.SINGLE_LINE)
     
     api.SetImage(Image.fromarray(thresh))
@@ -75,6 +37,7 @@ def get_text_out(img, single, debug):
 
     if debug is not None:
         cv2.imshow(debug, thresh)
+        
     
 
     ret = text
@@ -177,10 +140,11 @@ def on_new_room(new, old):
 # MAIN
 def get_recognizers():
     phase = Recognizer(validate_phase, True)
+    
     room = Recognizer(validate_room)
     score = Recognizer(validate_score)
     multi = Recognizer(validate_multi)  
-    multi.debug = "Multiplier"
+    multi.debug = "Multi"
 
 
 
@@ -191,49 +155,48 @@ def get_recognizers():
 
     return (phase, room, score, multi)
 
-
-if __name__ == "__main__":
-    if len(sys.argv) == 1:
-        sys.argv.append("returnal.webm")
-
-    if sys.argv[1].startswith("http"):
-        stream_url = get_stream_url(sys.argv[1])
-        cap = cv2.VideoCapture(stream_url)
-    else:
-        cap = cv2.VideoCapture(sys.argv[1])
-        cap.set(cv2.CAP_PROP_POS_MSEC, 1180000)
-
-    fps = FPS().start()
-    recognizers = get_recognizers()
+def get_frame_crop(capture):
+    _, frame = capture.read()
 
     w1 = 1584
     w2 = 1920
     h1 = 90
     h2 = 426
     
-    recalc = True
     wr = 1
     hr = 1
 
+    if frame.shape[0] != 1080:
+        wr = frame.shape[1] / 1920
+        hr = frame.shape[0] / 1080
+        w1 = int(w1 * wr)
+        w2 = int(w2 * wr)
+        h1 = int(h1 * hr)
+        h2 = int(h2 * hr)
+    
+    return slice(w1, w2), slice(h1, h2)
 
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        sys.argv.append("https://youtu.be/TrrxdfSFJJw")
+
+    if sys.argv[1].startswith("http"):
+        stream_url = get_stream_url(sys.argv[1])
+        cap = ReturnalFFMPEGCapture(stream_url, 1920, 1080)
+    else:
+        cap = cv2.VideoCapture(sys.argv[1])
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1180000)
+
+    recognizers = get_recognizers()
+
+    w, h = get_frame_crop(cap)
     while True:
-        ret, frame = cap.read()
-        if frame.shape[0] != 1080 and recalc:
-            print("RESIZING")
-            wr = frame.shape[1] / 1920
-            hr = frame.shape[0] / 1080
-
-            w1 = int(w1 * wr)
-            w2 = int(w2 * wr)
-            h1 = int(h1 * hr)
-            h2 = int(h2 * hr)
-            recalc = False
-            
-
-        frame = frame[h1:h2, w1:w2]
+        _, frame = cap.read()
+        frame = frame[h, w]
         frame = cv2.resize(frame, (336, 336))
-
-        fphase = frame[33:81, 76:124]
+        fphase = frame[25:57, 76:124]
         froom = frame[30:81, 187:252]
         fscore = frame[150:180, 67:307]
         fmulti = frame[223:260, 165:282]
@@ -250,7 +213,6 @@ if __name__ == "__main__":
             phase, room, score, multi = recognizers
             DB.record(phase.current, room.current, score.current, multi.current)
         
-        fps.update()
         cv2.imshow("Frame", frame)
         key = cv2.waitKey(1) & 0xFF
 
@@ -264,9 +226,9 @@ if __name__ == "__main__":
             recognizers = get_recognizers()
 
     # stop the timer and display FPS information
-    fps.stop()
-    print("[INFO] elasped time: {:.2f}".format(fps.elapsed()))
-    print("[INFO] approx. FPS: {:.2f}".format(fps.fps()))
+    cap.fps.stop()
+    print("[INFO] elasped time: {:.2f}".format(cap.fps.elapsed()))
+    print("[INFO] approx. FPS: {:.2f}".format(cap.fps.fps()))
 
     cap.release()
     cv2.destroyAllWindows()
