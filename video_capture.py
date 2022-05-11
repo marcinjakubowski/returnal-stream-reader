@@ -14,6 +14,8 @@ class ReturnalVideoCapture():
         self.fps.update()
         return False, None
 
+    def get_frame_no(self):
+        return self.fps._numFrames;
 
 class ReturnalCV2Capture(ReturnalVideoCapture):
     def __init__(self, url):
@@ -27,6 +29,9 @@ class ReturnalCV2Capture(ReturnalVideoCapture):
 
     def release(self):
         self.capture.release()
+
+    
+
         
 
 class ReturnalFFMPEGCapture(ReturnalVideoCapture):
@@ -35,7 +40,7 @@ class ReturnalFFMPEGCapture(ReturnalVideoCapture):
         self.width = width
         self.height = height
         self.frame_size = 3 * width * height
-        self.pipe = sp.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-i', url, '-f', 'image2pipe', '-pix_fmt', 'bgr24', '-vcodec', 'rawvideo', '-'],
+        self.pipe = sp.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'quiet', '-i', url, '-f', 'image2pipe', '-pix_fmt', 'bgr24', '-vcodec', 'rawvideo', '-'],
                              stdin=sp.PIPE, stdout=sp.PIPE, bufsize=self.frame_size)
     
     def read(self):

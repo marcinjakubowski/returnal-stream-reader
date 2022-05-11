@@ -8,7 +8,7 @@
       "name": "Recognizer: youtube",
       "type": "python",
       "request": "launch",
-      "program": "${file}",
+      "program": "returnal-reader.py",
       "console": "integratedTerminal",
       "args": ["https://www.youtube.com/watch?v=GFDUztIOvEU"]
     },
@@ -16,7 +16,7 @@
       "name": "Recognizer: local",
       "type": "python",
       "request": "launch",
-      "program": "${file}",
+      "program": "returnal-reader.py",
       "console": "integratedTerminal",
       "args": ["returnal.webm"]
     }
