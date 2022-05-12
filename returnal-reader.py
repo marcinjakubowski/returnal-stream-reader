@@ -209,31 +209,31 @@ class ReturnalRecognizer():
         original = self._read_capture()
         frame = original[self.crop_h, self.crop_w]
         frame = cv2.resize(frame, (336, 336))
-        fphase = frame[25:57, 76:124]
-        froom = frame[30:81, 187:252]
-        fscore = frame[150:180, 67:307]
-        fmulti = frame[223:260, 165:282]
-        fragments = (fphase, froom, fscore, fmulti)
-
+        fragments = frame[25:57, 76:124], frame[30:81, 187:252], frame[150:180, 67:307], frame[223:260, 165:282]
+        
         for rec, frag in zip(self.recognizers, fragments):
             if rec.recognize(frag):
                 self.last_frames[rec] = self.frameno
-        
-        
 
+        do_further_recognition = self._recognize_pause_restart()
+        self._recognize_new_room(do_further_recognition)
+
+        return original, frame
+    
+    def _recognize_pause_restart(self):
         # check whether something new has been recorded in a while
         last_frame_recorded_anything = max(self.last_frames.values())
         is_anything_recent = last_frame_recorded_anything > self.frameno - 500
-
 
         if self.wait_for_rerecognize == -1 and not is_anything_recent:
              logging.debug("Waiting for new recognition")
              self.wait_for_rerecognize = 1
              [rec.trigger_validation(False) for rec in self.recognizers]
+             return False
         elif self.wait_for_rerecognize > 0 and is_anything_recent:
             if (   (self.phase.is_new and self.phase.current == 1)
                  or (self.room.is_new and self.room.current == 1)):
-                logging.info("Recognized new run")
+                logging.debug("Recognized new run")
                 self.wait_for_rerecognize = -1
                 DB.start_new_run()
             elif (   (self.phase.is_new and self.phase.current == self.phase.last_known_previous)
@@ -244,23 +244,30 @@ class ReturnalRecognizer():
                 [rec.trigger_validation(True) for rec in self.recognizers]
                 self.phase.is_new = False
                 self.room.is_new = False
+                self.score.is_new = False
+                self.multi.is_new = False
                 self.wait_for_rerecognize = -1
         
-        # new room that hasn't been recorded
-        if self.wait_for_rerecognize == -1:
-            if (self.phase.is_new or self.room.is_new) and self.wait_for_timeout == -1:
-                self.wait_for_timeout = 100
-                self.wait_for = [rec for rec in [self.multi, self.room, self.phase] if not self._is_recent(rec)]
-            if self.wait_for_timeout > 0:
-                self.wait_for = list(filter(lambda rec: not rec.is_new, self.wait_for))
-                self.wait_for_timeout -= 1
-            if not self.wait_for or self.wait_for_timeout == 0:
-                DB.record(self.phase.current, self.room.current, self.score.current, self.multi.current)
-                self.wait_for_timeout = -1
-                self.wait_for = [None]
+        return True
 
-        return original, frame
-    
+    def _recognize_new_room(self, should_recognize):
+        if not should_recognize:
+            return False
+        
+        # new room that hasn't been recorded
+        if (self.phase.is_new or self.room.is_new) and self.wait_for_timeout == -1:
+            self.wait_for_timeout = 100
+            self.wait_for = [rec for rec in [self.multi, self.room, self.phase] if not self._is_recent(rec)]
+        if self.wait_for_timeout > 0:
+            self.wait_for = list(filter(lambda rec: not rec.is_new, self.wait_for))
+            self.wait_for_timeout -= 1
+        if not self.wait_for or self.wait_for_timeout == 0:
+            DB.record(self.phase.current, self.room.current, self.score.current, self.multi.current)
+            self.wait_for_timeout = -1
+            self.wait_for = [None]
+
+        return True
+
     def _get_frame_crop(self):
         _, frame = self.capture.read()
 
