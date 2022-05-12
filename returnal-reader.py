@@ -28,8 +28,7 @@ def get_stream_url(url):
 def get_text_out(img, single, debug):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     mask = cv2.inRange(gray, (127,), (255,))
-    if np.count_nonzero(mask) / np.size(mask) <= 0.03:
-        return None, 0
+    
     ret, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
     api.SetPageSegMode(PSM.SINGLE_CHAR if single else PSM.SINGLE_LINE)
     
@@ -39,7 +38,8 @@ def get_text_out(img, single, debug):
     if debug is not None:
         cv2.imshow(debug, thresh)
         
-    
+    if np.count_nonzero(mask) / np.size(mask) <= 0.03:
+        return None, 0
 
     ret = text
     if ret:
@@ -107,6 +107,16 @@ class Recognizer(object):
         self.on_new_value_fun = lambda new, old: None
         self.is_new = False
         self._last_debug = ""
+        self.disable_validation = False
+        self.last_known_previous = -1
+
+    def trigger_validation(self, is_enabled):
+        if not is_enabled:
+            self.last_known_previous = self.current
+            self.current = 0
+        else:
+            self.current = self.last_known_previous
+            self.last_known_previous = -1
 
     def set_on_new_value(self, fun):
         self.on_new_value_fun = fun or (lambda new, old: None)
@@ -135,10 +145,10 @@ class Recognizer(object):
         if not self.last.all_equal():
             self._debug(f"Not equal {text}")
             return False
-
+        
         value = self.validator(text, self.current)
         if value is None:
-            self._debug(f"Not valid {text}")
+            self._debug(f"Not valid {text} vs {self.current}")
             return False
         
         if value != self.current:
@@ -182,6 +192,7 @@ class ReturnalRecognizer():
         self.frameno = -1
         self.wait_for = [None]
         self.wait_for_timeout = -1
+        self.wait_for_rerecognize = -1
 
         self.crop_w, self.crop_h = self._get_frame_crop()
 
@@ -195,8 +206,8 @@ class ReturnalRecognizer():
 
 
     def update(self):
-        frame = self._read_capture()
-        frame = frame[self.crop_h, self.crop_w]
+        original = self._read_capture()
+        frame = original[self.crop_h, self.crop_w]
         frame = cv2.resize(frame, (336, 336))
         fphase = frame[25:57, 76:124]
         froom = frame[30:81, 187:252]
@@ -209,23 +220,46 @@ class ReturnalRecognizer():
                 self.last_frames[rec] = self.frameno
         
         
+
+        # check whether something new has been recorded in a while
+        last_frame_recorded_anything = max(self.last_frames.values())
+        is_anything_recent = last_frame_recorded_anything > self.frameno - 500
+
+
+        if self.wait_for_rerecognize == -1 and not is_anything_recent:
+             logging.debug("Waiting for new recognition")
+             self.wait_for_rerecognize = 1
+             [rec.trigger_validation(False) for rec in self.recognizers]
+        elif self.wait_for_rerecognize > 0 and is_anything_recent:
+            if (   (self.phase.is_new and self.phase.current == 1)
+                 or (self.room.is_new and self.room.current == 1)):
+                logging.info("Recognized new run")
+                self.wait_for_rerecognize = -1
+                DB.start_new_run()
+            elif (   (self.phase.is_new and self.phase.current == self.phase.last_known_previous)
+                  or (self.room.is_new and self.room.current == self.room.last_known_previous)
+                  or (self.score.is_new and self.score.current == self.score.last_known_previous)
+                  or (self.multi.is_new and self.multi.current == self.multi.last_known_previous)):
+                logging.debug("Previous run detected")
+                [rec.trigger_validation(True) for rec in self.recognizers]
+                self.phase.is_new = False
+                self.room.is_new = False
+                self.wait_for_rerecognize = -1
+        
         # new room that hasn't been recorded
-        if (self.phase.is_new or self.room.is_new) and self.wait_for_timeout == -1:
-            logging.info("New room")
-            self.wait_for_timeout = 100
-            self.wait_for = [rec for rec in [self.multi, self.room, self.phase] if not self._is_recent(rec)]
+        if self.wait_for_rerecognize == -1:
+            if (self.phase.is_new or self.room.is_new) and self.wait_for_timeout == -1:
+                self.wait_for_timeout = 100
+                self.wait_for = [rec for rec in [self.multi, self.room, self.phase] if not self._is_recent(rec)]
+            if self.wait_for_timeout > 0:
+                self.wait_for = list(filter(lambda rec: not rec.is_new, self.wait_for))
+                self.wait_for_timeout -= 1
+            if not self.wait_for or self.wait_for_timeout == 0:
+                DB.record(self.phase.current, self.room.current, self.score.current, self.multi.current)
+                self.wait_for_timeout = -1
+                self.wait_for = [None]
 
-
-        if self.wait_for_timeout > 0:
-            self.wait_for = list(filter(lambda rec: not rec.is_new, self.wait_for))
-            self.wait_for_timeout -= 1
-            
-        if not self.wait_for or self.wait_for_timeout == 0:
-            DB.record(self.phase.current, self.room.current, self.score.current, self.multi.current)
-            self.wait_for_timeout = -1
-            self.wait_for = [None]
-
-        return frame
+        return original, frame
     
     def _get_frame_crop(self):
         _, frame = self.capture.read()
@@ -235,46 +269,24 @@ class ReturnalRecognizer():
         h1 = 90
         h2 = 426
         
-        wr = 1
-        hr = 1
+        ratio_width = 1
+        ratio_height = 1
 
         if frame.shape[0] != 1080:
-            wr = frame.shape[1] / 1920
-            hr = frame.shape[0] / 1080
-            w1 = int(w1 * wr)
-            w2 = int(w2 * wr)
-            h1 = int(h1 * hr)
-            h2 = int(h2 * hr)
+            ratio_width = frame.shape[1] / 1920
+            ratio_height = frame.shape[0] / 1080
+            w1 = int(w1 * ratio_width)
+            w2 = int(w2 * ratio_width)
+            h1 = int(h1 * ratio_height)
+            h2 = int(h2 * ratio_height)
         self.title = frame
         
         return slice(w1, w2), slice(h1, h2)
 
-
-
-
-SHOULD_RECORD = -1
-
-def on_new_phase(new, old):
-    global SHOULD_RECORD
-    if new > 1:
-        SHOULD_RECORD = 20
-    print(f"Phase => {new}")
-
-def on_new_room(new, old):
-    global SHOULD_RECORD
-    
-    print(f"Room => {new}")    
-    # skip saving, phase will trigger
-    if new == 1 and old > 1:
-        return
-    
-    SHOULD_RECORD = 20
-
-
 DEFAULT="returnal.webm"
 
 if __name__ == "__main__":
-    logging.basicConfig(format='[%(levelname)s @ %(asctime)s] %(message)s', datefmt='%H:%M:%S', level=logging.INFO)
+    logging.basicConfig(format='[%(levelname)s @ %(asctime)s] %(message)s', datefmt='%H:%M:%S', level=logging.DEBUG)
 
     if len(sys.argv) == 1:
         sys.argv.append(DEFAULT)
@@ -289,22 +301,32 @@ if __name__ == "__main__":
 
     recognize = ReturnalRecognizer(cap)
     title = cv2.resize(recognize.title, (640, 480))
-    cv2.imshow("Frame", title)
+    #recognize.room.debug = "Room"
+    #cv2.imshow("Frame", title)
+    paused = False
+    skipping = False
     while True:
-        frame = recognize.update()
-        
-        
-        
         key = cv2.waitKey(1) & 0xFF
 
         if key == ord("q"):
             break
+        elif key == ord("p"):
+            paused = not paused
         elif key == ord("s"):
+            skipping = not skipping
+        elif key == ord("z"):
             for label, rec in zip(LABELS, recognize.recognizers):
                 print(f"{label} = {rec.current}")
         elif key == ord("r"):
             DB.start_new_run()
             recognize = ReturnalRecognizer(cap)
+
+        if paused:
+            continue
+            
+        frame, subframe = recognize.update()
+        display = cv2.resize(frame, (800, 450))
+        cv2.imshow("Current", display)
 
     # stop the timer and display FPS information
     cap.fps.stop()
