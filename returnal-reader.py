@@ -182,7 +182,7 @@ class ReturnalRecognizer():
         self.room.set_on_new_value(lambda new, old: logging.info(f"Room => {new}"))
         def validate_phase(new, old):
             new = validate_int(new, old)
-            if (new == old + 1 or old == 0) and (self.room.current in (1, 20)):
+            if (new == old + 1 or old == 0) and (self.room.current in range(1, 20)):
                 return new
             return old
         self.phase = Recognizer(validate_phase, True)
@@ -270,7 +270,7 @@ class ReturnalRecognizer():
         if self.wait_for_timeout > 0:
             self.wait_for = list(filter(lambda rec: not rec.is_new, self.wait_for))
             self.wait_for_timeout -= 1
-        if not self.wait_for or self.wait_for_timeout == 0:
+        if (self.phase.current > 0 and self.room.current > 0) and (not self.wait_for or self.wait_for_timeout == 0):
             DB.record(self.phase.current, self.room.current, self.score.current, self.multi.current)
             self.wait_for_timeout = -1
             self.wait_for = [None]
@@ -317,8 +317,6 @@ if __name__ == "__main__":
 
     recognize = ReturnalRecognizer(cap)
     title = cv2.resize(recognize.title, (640, 480))
-    #recognize.room.debug = "Room"
-    #cv2.imshow("Frame", title)
     paused = False
     skipping = False
     while True:
