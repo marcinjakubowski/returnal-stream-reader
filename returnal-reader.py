@@ -58,10 +58,7 @@ def validate_int(new, old):
 
 def validate_not_smaller(new, old):
     new = validate_int(new, old)
-    return new if new > old else None
-    
-
-
+    return new if new >= old else None
 
 
 def validate_room(new, old):
@@ -69,7 +66,9 @@ def validate_room(new, old):
     if 1 <= new <= 20 and (
         old == 0 or # initial
         new == old + 1 or # regular progress
+        new == old or 
         (new == 1 and old == 20) # switch phases
+
     ): 
         return new
     
@@ -101,7 +100,9 @@ class Recognizer(object):
     def __init__(self, validator, is_single_digit=False):
         self.debug = None
         self.last = CircularBuffer(CONFIDENCE_SIZE)
+        self.last_correction = CircularBuffer(CONFIDENCE_SIZE * 3)
         self.current = 0
+        self.previous = 0
         self.validator = validator or (lambda new, old: new)
         self.is_single_digit = is_single_digit
         self.on_new_value_fun = lambda new, old: None
@@ -109,6 +110,7 @@ class Recognizer(object):
         self._last_debug = ""
         self.disable_validation = False
         self.last_known_previous = -1
+        self.count_invalid = 0
 
     def trigger_validation(self, is_enabled):
         if not is_enabled:
@@ -141,6 +143,7 @@ class Recognizer(object):
             return False
 
         self.last.record(text)
+        self.last_correction.record(text)
 
         if not self.last.all_equal():
             self._debug(f"Not equal {text}")
@@ -148,21 +151,27 @@ class Recognizer(object):
         
         value = self.validator(text, self.current)
         if value is None:
+            self.count_invalid += 1
             self._debug(f"Not valid {text} vs {self.current}")
-            return False
+            # check correction
+            if self.count_invalid > 10 and self.last_correction.all_equal():
+                self._debug(f"Correcting from {self.current} to {text}")
+                value = self.validator(text, self.previous)
+
+            if value is None:
+                return False
         
+        self.count_invalid = 0
+
         if value != self.current:
             self.on_new_value_fun(value, self.current)
+            self.previous = self.current
             self.current = value
             if self.debug:
                 logging.info(f"{self.debug} > New value = {value}")
             return True
         
         return False
-
-
-
-
 
 
 class ReturnalRecognizer():
