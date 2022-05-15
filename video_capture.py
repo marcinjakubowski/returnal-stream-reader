@@ -22,6 +22,10 @@ class ReturnalCV2Capture(ReturnalVideoCapture):
         super().__init__(url)
         self.capture = cv2.VideoCapture(url)
     
+    def skip(self, frames):
+        self.fps._numFrames += frames
+        self.capture.set(cv2.CAP_PROP_POS_FRAMES, self.capture.get(cv2.CAP_PROP_POS_FRAMES) + frames)
+
     def read(self):
         super().read()
         ret, frame = self.capture.read()

@@ -107,6 +107,7 @@ class Recognizer(object):
         self.is_single_digit = is_single_digit
         self.on_new_value_fun = lambda new, old: None
         self.is_new = False
+        self.is_correct = False
         self._last_debug = ""
         self.disable_validation = False
         self.last_known_previous = -1
@@ -114,7 +115,7 @@ class Recognizer(object):
 
     def trigger_validation(self, is_enabled):
         if not is_enabled:
-            self.last_known_previous = self.current
+            self.last_known_previous = self.current if self.current != 0 else self.last_known_previous
             self.current = 0
         else:
             self.current = self.last_known_previous
@@ -124,8 +125,8 @@ class Recognizer(object):
         self.on_new_value_fun = fun or (lambda new, old: None)
 
     def recognize(self, image):
-        self.is_new = self._recognize(image)
-        return self.is_new
+        self.is_correct, self.is_new = self._recognize(image)
+        return self.is_correct
 
     def _debug(self, message):
             if self.debug and self._last_debug != message:
@@ -135,19 +136,19 @@ class Recognizer(object):
     def _recognize(self, image):
         text, confidence = get_text_out(image, self.is_single_digit, self.debug)
         if text is None or confidence < 60:
-            return False
+            return False, False
 
         text = re.sub(r"[^\d]", "", text)
         if len(text.lstrip()) == 0:
             self._debug(f"Empty text")
-            return False
+            return False, False
 
         self.last.record(text)
         self.last_correction.record(text)
 
         if not self.last.all_equal():
             self._debug(f"Not equal {text}")
-            return False
+            return False, False
         
         value = self.validator(text, self.current)
         if value is None:
@@ -159,7 +160,7 @@ class Recognizer(object):
                 value = self.validator(text, self.previous)
 
             if value is None:
-                return False
+                return False, False
         
         self.count_invalid = 0
 
@@ -169,9 +170,9 @@ class Recognizer(object):
             self.current = value
             if self.debug:
                 logging.info(f"{self.debug} > New value = {value}")
-            return True
+            return True, True
         
-        return False
+        return True, False
 
 
 class ReturnalRecognizer():
@@ -193,15 +194,19 @@ class ReturnalRecognizer():
         self.multi.set_on_new_value(lambda new, old: logging.info(f"Multi => {new}"))
         self.recognizers = (self.phase, self.room, self.score, self.multi)
         self.last_frames = {
-            self.phase: -1,
-            self.room: -1,
-            self.score: -1,
-            self.multi: -1
+            self.phase: -1000,
+            self.room: -1000,
+            self.score: -1000,
+            self.multi: -1000
         }
         self.frameno = -1
         self.wait_for = [None]
+        self.wait_for_skip = []
         self.wait_for_timeout = -1
         self.wait_for_rerecognize = -1
+        self.skipping = 0
+        self.skip = 0
+        self.skipped_new_room = False
 
         self.crop_w, self.crop_h = self._get_frame_crop()
 
@@ -209,8 +214,10 @@ class ReturnalRecognizer():
         return self.last_frames[rec] >= self.frameno - 30
 
     def _read_capture(self):
-        _, frame = cap.read()
-        self.frameno = cap.get_frame_no()
+        if self.skipping > 0:
+            self.capture.skip(self.skipping)
+        _, frame = self.capture.read()
+        self.frameno = self.capture.get_frame_no()
         return frame
 
 
@@ -225,9 +232,39 @@ class ReturnalRecognizer():
                 self.last_frames[rec] = self.frameno
 
         do_further_recognition = self._recognize_pause_restart()
-        self._recognize_new_room(do_further_recognition)
+        do_further_recognition = self._recognize_skipped(do_further_recognition)
+        do_further_recognition = self._recognize_new_room(do_further_recognition)
+        
 
         return original, frame
+
+    def _recognize_skipped(self, should_recognize):
+        if not should_recognize or self.wait_for_rerecognize != -1:
+            self.wait_for_skip = []
+            return False
+        
+        if self.wait_for_timeout != -1 or self.skip == 0:
+            return True
+
+        if self.skipping == self.skip and not self.wait_for_skip:
+            self.wait_for_skip = [*self.recognizers]
+            self.skipping = 0
+        elif self.skipping == 0 and self.skip > 0 and not self.wait_for_skip:
+            self.skipping = self.skip
+            self.skipped_new_room = False
+            logging.debug(f"Skipping for {self.skip} frames")
+
+        if self.wait_for_skip:
+            self.wait_for_skip = list(filter(lambda rec: not rec.is_correct, self.wait_for_skip))
+            if self.phase.is_new or self.room.is_new:
+                self.skipped_new_room = True
+
+            if not self.wait_for_skip:
+                if self.skipped_new_room:
+                    self.wait_for_timeout = 0
+                return self.skipped_new_room
+
+        return False            
     
     def _recognize_pause_restart(self):
         # check whether something new has been recorded in a while
@@ -240,11 +277,13 @@ class ReturnalRecognizer():
              [rec.trigger_validation(False) for rec in self.recognizers]
              return False
         elif self.wait_for_rerecognize > 0 and is_anything_recent:
-            if (   (self.phase.is_new and self.phase.current == 1)
-                 or (self.room.is_new and self.room.current == 1)):
-                logging.debug("Recognized new run")
+            if (self.phase.last_known_previous == -1 and 
+                self.room.last_known_previous == -1 and
+                self.score.last_known_previous == -1 and
+                self.multi.last_known_previous == -1
+                ):
+                logging.debug("New video detected")
                 self.wait_for_rerecognize = -1
-                DB.start_new_run()
             elif (   (self.phase.is_new and self.phase.current == self.phase.last_known_previous)
                   or (self.room.is_new and self.room.current == self.room.last_known_previous)
                   or (self.score.is_new and self.score.current == self.score.last_known_previous)
@@ -256,21 +295,30 @@ class ReturnalRecognizer():
                 self.score.is_new = False
                 self.multi.is_new = False
                 self.wait_for_rerecognize = -1
+            elif (   (self.phase.is_new and self.phase.current == 1)
+                 or (self.room.is_new and self.room.current == 1)):
+                logging.debug("Recognized new run")
+                self.wait_for_rerecognize = -1
+                DB.start_new_run()
+            
         
         return True
 
     def _recognize_new_room(self, should_recognize):
         if not should_recognize:
             return False
-        
+
         # new room that hasn't been recorded
         if (self.phase.is_new or self.room.is_new) and self.wait_for_timeout == -1:
             self.wait_for_timeout = 100
             self.wait_for = [rec for rec in [self.multi, self.room, self.phase] if not self._is_recent(rec)]
+        
         if self.wait_for_timeout > 0:
-            self.wait_for = list(filter(lambda rec: not rec.is_new, self.wait_for))
+            self.wait_for = list(filter(lambda rec: not rec.is_correct, self.wait_for))
             self.wait_for_timeout -= 1
-        if (self.phase.current > 0 and self.room.current > 0) and (not self.wait_for or self.wait_for_timeout == 0):
+
+        still_wait = not self.wait_for or (self.wait_for_timeout == 0 and self.multi.current > 0)
+        if (self.phase.current > 0 and self.room.current > 0) and still_wait:
             DB.record(self.phase.current, self.room.current, self.score.current, self.multi.current)
             self.wait_for_timeout = -1
             self.wait_for = [None]
@@ -299,7 +347,7 @@ class ReturnalRecognizer():
         
         return slice(w1, w2), slice(h1, h2)
 
-DEFAULT="returnal.webm"
+DEFAULT="returnal.mp4"
 
 if __name__ == "__main__":
     logging.basicConfig(format='[%(levelname)s @ %(asctime)s] %(message)s', datefmt='%H:%M:%S', level=logging.DEBUG)
@@ -316,9 +364,9 @@ if __name__ == "__main__":
         cap = ReturnalCV2Capture(sys.argv[1])
 
     recognize = ReturnalRecognizer(cap)
+    #recognize.skip = 50
     title = cv2.resize(recognize.title, (640, 480))
     paused = False
-    skipping = False
     while True:
         key = cv2.waitKey(1) & 0xFF
 
@@ -326,8 +374,6 @@ if __name__ == "__main__":
             break
         elif key == ord("p"):
             paused = not paused
-        elif key == ord("s"):
-            skipping = not skipping
         elif key == ord("z"):
             for label, rec in zip(LABELS, recognize.recognizers):
                 print(f"{label} = {rec.current}")
