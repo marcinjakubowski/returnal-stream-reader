@@ -308,6 +308,8 @@ class ReturnalRecognizer():
             elif (   (self.phase.is_correct and self.phase.current == 1)
                  and (self.room.is_correct and self.room.current == 1)):
                 self.logger.debug(" REC | Recognized new run")
+                self.multi.current = 1
+                self.score.current = 1
                 self.wait_for_rerecognize = -1
                 DB.start_new_run(self.id)
             
