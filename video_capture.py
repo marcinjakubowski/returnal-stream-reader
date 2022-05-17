@@ -34,6 +34,9 @@ class ReturnalCV2Capture(ReturnalVideoCapture):
     def release(self):
         self.capture.release()
 
+    def get_time(self):
+        return self.capture.get(cv2.CAP_PROP_POS_MSEC)
+
     
 
         
@@ -47,6 +50,9 @@ class ReturnalFFMPEGCapture(ReturnalVideoCapture):
         self.pipe = sp.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'quiet', '-i', url, '-f', 'image2pipe', '-pix_fmt', 'bgr24', '-vcodec', 'rawvideo', '-'],
                              stdin=sp.PIPE, stdout=sp.PIPE, bufsize=self.frame_size)
     
+    def get_time(self):
+        self.get_frame_no()
+
     def read(self):
         super().read()
         raw = self.pipe.stdout.read(self.frame_size)
