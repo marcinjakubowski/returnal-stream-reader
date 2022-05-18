@@ -90,7 +90,7 @@ def validate_score(new, old):
 
 def validate_multi(new, old):
     multiplier = validate_int(new, old) 
-    if multiplier is None:
+    if multiplier is None or multiplier > 10000:
         return None
 
     multiplier = multiplier/100.0
@@ -236,7 +236,7 @@ class ReturnalRecognizer():
         original = self._read_capture()
         frame = original[self.crop_h, self.crop_w]
         frame = cv2.resize(frame, (336, 336))
-        fragments = frame[25:57, 76:124], frame[30:81, 187:252], frame[150:180, 67:307], frame[223:260, 165:282]
+        fragments = frame[30:81, 70:144], frame[30:81, 187:252], frame[150:180, 67:307], frame[223:260, 165:282]
         
         for rec, frag in zip(self.recognizers, fragments):
             if rec.recognize(frag):
