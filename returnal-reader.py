@@ -327,12 +327,14 @@ class ReturnalRecognizer():
             if self.room.current == 1 and self.phase not in self.wait_for:
                 self.wait_for.append(self.phase)
         
-        if self.wait_for_timeout > 0:
+        elif self.wait_for_timeout > 0:
             self.wait_for = list(filter(lambda rec: not rec.is_correct, self.wait_for))
             self.wait_for_timeout -= 1
 
         still_wait = not self.wait_for or (self.wait_for_timeout == 0 and self.multi.current > 0)
         if (self.phase.current > 0 and self.room.current > 0) and still_wait:
+            if self.room.current == 1 and self.phase in self.wait_for:
+                self.phase.current += 1
             time = self.capture.get_time()
             DB.record(time, self.phase.current, self.room.current, self.score.current, self.multi.current)
             self.wait_for_timeout = -1
