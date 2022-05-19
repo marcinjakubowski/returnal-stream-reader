@@ -1,5 +1,6 @@
 scratch*.py
-returnal.db
+*.db
+*.log
 *.webm
 *.mp4
 # Created by https://www.toptal.com/developers/gitignore/api/visualstudiocode,python
