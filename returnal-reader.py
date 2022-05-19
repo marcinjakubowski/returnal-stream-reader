@@ -327,9 +327,9 @@ class ReturnalRecognizer():
             if self.room.current == 1 and self.phase not in self.wait_for:
                 self.wait_for.append(self.phase)
         
-        elif self.wait_for_timeout > 0:
+        elif self.wait_for_timeout >= 0:
             self.wait_for = list(filter(lambda rec: not rec.is_correct, self.wait_for))
-            self.wait_for_timeout -= 1
+            self.wait_for_timeout = self.wait_for_timeout - 1 if self.wait_for_timeout > 0 else self.wait_for_timeout
 
         still_wait = not self.wait_for or (self.wait_for_timeout == 0 and self.multi.current > 0)
         if (self.phase.current > 0 and self.room.current > 0) and still_wait:
